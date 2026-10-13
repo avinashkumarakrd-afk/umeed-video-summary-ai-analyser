@@ -4,6 +4,7 @@ import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI } from '@google/genai';
+import { resolveNeetNotesForTitle } from './src/data/neetChapterDatabase.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -26,17 +27,58 @@ const ai = apiKey
     })
   : null;
 
+// Resilient Gemini Caller with Per-Model Timeout
+async function callGemini(params: {
+  contents: any;
+  systemInstruction?: string;
+  temperature?: number;
+  timeoutMs?: number;
+}): Promise<string> {
+  if (!ai) {
+    throw new Error('No AI client initialized');
+  }
+
+  const timeoutMs = params.timeoutMs ?? 20000;
+  const candidateModels = ['gemini-3.1-flash-lite', 'gemini-3.8-flash'];
+  let lastError: any = null;
+
+  for (const model of candidateModels) {
+    try {
+      const callPromise = ai.models.generateContent({
+        model,
+        contents: params.contents,
+        config: {
+          systemInstruction: params.systemInstruction,
+          temperature: params.temperature ?? 0.3,
+        },
+      });
+
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`Timeout after ${timeoutMs}ms on ${model}`)), timeoutMs)
+      );
+
+      const response = await Promise.race([callPromise, timeoutPromise]);
+      if (response && response.text) {
+        return response.text;
+      }
+    } catch (err: any) {
+      console.warn(`Model ${model} issue or timeout (${err?.message?.slice(0, 80)}). Trying fallback...`);
+      lastError = err;
+    }
+  }
+
+  throw lastError;
+}
+
 // Utility to extract YouTube Video ID
 function extractYouTubeId(url: string): string | null {
   if (!url) return null;
   const trimmed = url.trim();
-  // Standard watch URL: youtube.com/watch?v=ID
   const regExp = /(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=|shorts\/|live\/))([\w-]{11})/;
   const match = trimmed.match(regExp);
   if (match && match[1]) {
     return match[1];
   }
-  // Raw 11 char ID
   if (/^[\w-]{11}$/.test(trimmed)) {
     return trimmed;
   }
@@ -122,7 +164,7 @@ app.post('/api/video/info', async (req: Request, res: Response) => {
         thumbnailUrl = data.thumbnail_url || thumbnailUrl;
       }
     } catch {
-      // Fallback if oembed fails or network restricted
+      // Fallback
     }
 
     const subject = detectSubject(title);
@@ -142,7 +184,7 @@ app.post('/api/video/info', async (req: Request, res: Response) => {
   }
 });
 
-// Enforce 2-page NEET Notes format
+// Enforce 2-page NEET Notes format for ANY chapter across Bio, Chem, Physics
 app.post('/api/gemini/generate-notes', async (req: Request, res: Response) => {
   try {
     const { videoId, videoTitle, videoUrl, subject } = req.body;
@@ -150,69 +192,62 @@ app.post('/api/gemini/generate-notes', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Video details are required' });
     }
 
+    const inferredSubject = subject || detectSubject(videoTitle);
+
     const prompt = `
 YOU ARE THE NEET AI LECTURE COMPANION TUTOR.
 STUDENT REQUEST: "Concise the full video into 1-2 pages of notes".
 
-CRITICAL DYNAMIC CONTEXT DIRECTIVE:
-- Discard ANY past video session or outside topics.
-- Analyze strictly THIS SPECIFIC LECTURE:
-  Title: "${videoTitle}"
-  YouTube Link: ${videoUrl || `https://www.youtube.com/watch?v=${videoId}`}
-  Target Subject: ${subject || 'NEET Prep'}
+DYNAMIC CONTEXT DIRECTIVE:
+Analyze strictly THIS SPECIFIC LECTURE AND CHAPTER:
+Title: "${videoTitle}"
+URL: ${videoUrl || `https://www.youtube.com/watch?v=${videoId}`}
+Target Subject: ${inferredSubject}
 
-ENFORCE THE MANDATORY 2-PAGE NEET STRUCTURE:
+MANDATORY 2-PAGE STRUCTURE SPECIFIC TO THIS EXACT CHAPTER:
 
 PAGE 1: Core Concepts, Definitions, and NCERT-Aligned Key Takeaways
-- Must include:
-  1. Detailed breakdown of core concepts taught in this lecture
-  2. NCERT line-by-line definitions, standard terminologies & conventions
-  3. High-yield conceptual checkpoints (what NTA NEET examiners frequently test)
-  4. Common student misconceptions and traps to avoid
+- Breakdown of every important concept, mechanism, and definition in this specific video.
+- Exact NCERT line-by-line terminology, classifications, and standard conventions for this chapter.
+- High-yield checkpoints (what NTA NEET examiners frequently test for this chapter).
+- Common student misconceptions and traps to avoid.
 
-PAGE 2: All Formulas/Equations, Shortcut Tricks, and High-Yield PYQ Highlights from THIS SPECIFIC VIDEO
-- Must include:
-  1. Complete Formula Bank: Every mathematical relation, SI units, dimensional formula, and proportionality relation taught in this lecture.
-  2. Speed Solving & Shortcut Tricks (mental math, dimensional analysis shortcuts, elimination heuristics).
-  3. High-Yield PYQ Highlights: Specific previous years NEET questions (from 2015-2024 trends) directly solved or related to this exact video's topics, with year, question theme, and key concept applied.
+PAGE 2: All Formulas/Equations/Fact Bank, Shortcut Tricks, and High-Yield PYQ Highlights
+- Complete Formula Bank / Numerical Data / Biochemical & Anatomical Fact Bank for this chapter.
+- Speed-solving shortcuts, dimensional analysis hacks, or biological mnemonics taught in this video.
+- 3-4 High-Yield PYQs from 2018-2024 testing this exact chapter with step-by-step solutions.
 
-FORMATTING:
-Return clear, crisp Markdown with clean LaTeX/notation for equations (e.g. $F = ma$, $\\tau = I\\alpha$).
-Clearly delineate:
+Delineate clearly with:
 # PAGE 1: CORE CONCEPTS & NCERT TAKEAWAYS
 and
 # PAGE 2: FORMULA BANK, SHORTCUTS & PYQ HIGHLIGHTS
 `;
 
-    if (!ai) {
-      return res.json({
-        notes: `# PAGE 1: CORE CONCEPTS & NCERT TAKEAWAYS\n\n### Lecture: ${videoTitle}\n- **Core Topic**: Comprehensive NEET ${subject} lecture.\n- **NCERT Alignment**: Direct coverage of NCERT chapter fundamentals.\n- **Key Definitions**: Standard definitions, state variables, and boundary conditions.\n- **Critical Takeaways**: Focus on fundamental principles, sign conventions, and graph interpretations.\n\n# PAGE 2: FORMULA BANK, SHORTCUTS & PYQ HIGHLIGHTS\n\n### 📐 Formula Bank\n- Key mathematical equations, proportionality relations, and unit consistency rules.\n\n### ⚡ Speed Tricks\n- Extreme value checking & dimensional elimination technique.\n\n### 🎯 High-Yield PYQs\n- Direct questions from NEET 2021, 2022, 2023 on this core chapter.`,
-      });
-    }
-
     try {
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+      const text = await callGemini({
         contents: prompt,
-        config: {
-          systemInstruction:
-            'You are a premier NEET educator specializing in structured, high-yield NCERT lecture extraction. Maintain absolute context isolation for each video.',
-          temperature: 0.3,
-        },
+        systemInstruction:
+          `You are an elite NEET educator specializing in ${inferredSubject}. Generate rigorous, chapter-specific NCERT notes.`,
+        temperature: 0.3,
+        timeoutMs: 18000,
       });
 
-      return res.json({ notes: response.text || '' });
+      return res.json({ notes: text, subject: inferredSubject });
     } catch (modelErr) {
-      console.warn('gemini-2.5-flash call fallback, trying gemini-3.8-flash:', modelErr);
-      const fallbackResponse = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: prompt,
+      console.warn('Falling back to chapter knowledge engine:', modelErr);
+      const resolved = resolveNeetNotesForTitle(videoTitle, inferredSubject);
+      return res.json({
+        notes: `${resolved.page1}\n\n${resolved.page2}`,
+        subject: resolved.subject,
       });
-      return res.json({ notes: fallbackResponse.text || '' });
     }
   } catch (err: any) {
     console.error('Error generating notes:', err);
-    return res.status(500).json({ error: err.message || 'Failed to generate notes' });
+    const resolved = resolveNeetNotesForTitle(req.body?.videoTitle || 'NEET Lecture', req.body?.subject);
+    return res.json({
+      notes: `${resolved.page1}\n\n${resolved.page2}`,
+      subject: resolved.subject,
+    });
   }
 });
 
@@ -220,79 +255,57 @@ and
 app.post('/api/gemini/preset', async (req: Request, res: Response) => {
   try {
     const { videoTitle, videoUrl, subject, presetType } = req.body;
+    const inferredSubject = subject || detectSubject(videoTitle);
 
     let specificPrompt = '';
     switch (presetType) {
       case 'formula':
-        specificPrompt = `Generate a dedicated "FORMULA SHEET" strictly from this specific NEET lecture: "${videoTitle}".
-Include:
-1. Every formula, equation, constant value, and SI unit taught in this video.
-2. Sign conventions and condition constraints.
-3. Proportionality relationships (e.g. $y \\propto x^2$).
-4. 3 Super-fast calculation hacks / shortcuts.`;
+        specificPrompt = `Extract a dedicated "FORMULA SHEET / FACT BANK" strictly for this chapter: "${videoTitle}" (${inferredSubject}):
+1. Every formula/equation, SI unit, constant, or biological/chemical data point.
+2. Sign conventions or pathway sequences.
+3. 2 Speed calculation shortcuts or mnemonics.`;
         break;
 
       case 'pyq':
-        specificPrompt = `Extract "KEY HIGH-YIELD PYQs" directly tested on the exact concepts covered in this NEET video: "${videoTitle}".
-Include:
-- 4 to 5 past NEET questions (mentioning year like NEET 2019, NEET 2021, NEET 2023).
-- Question statement.
-- Four options (A, B, C, D).
-- Step-by-step solution referencing the NCERT formula or concept taught in the lecture.
-- "Why students get this wrong" trap alert.`;
+        specificPrompt = `Extract "KEY HIGH-YIELD PYQs" from "${videoTitle}" (${inferredSubject}):
+- 3 to 4 recent NEET questions (2018-2024) on this exact chapter.
+- Question statement, options (A, B, C, D), correct option, and step-by-step NCERT reasoning.`;
         break;
 
       case 'mcq':
-        specificPrompt = `Generate "5 PRACTICE MCQs" for NEET aspirants based STRICTLY on this video: "${videoTitle}".
-Format each question with:
-Q1 to Q5:
-- Question stem (clinical/numerical/assertion-reasoning style as per latest NTA NEET pattern).
-- Options: (A), (B), (C), (D).
-- Correct Option.
-- Detailed NCERT-grounded Explanation and elimination reason.`;
+        specificPrompt = `Generate 5 high-yield NEET practice MCQs from "${videoTitle}" (${inferredSubject}) with options (A, B, C, D), answer keys, and NCERT explanations.`;
         break;
 
       default:
-        specificPrompt = `Provide a structured NEET revision summary for the video "${videoTitle}".`;
+        specificPrompt = `Provide a structured NEET revision summary for "${videoTitle}".`;
     }
 
     const fullPrompt = `
 DYNAMIC CONTEXT DIRECTIVE:
-You are analyzing ONLY this video: "${videoTitle}" (${videoUrl || ''}, Subject: ${subject || 'NEET'}).
-Wipe all previous conversation history. Focus exclusively on this lecture.
-
+Analyze ONLY: "${videoTitle}" (${inferredSubject}). Wipe previous context.
 ${specificPrompt}
 `;
 
-    if (!ai) {
-      return res.json({
-        content: `### ${presetType.toUpperCase()} for ${videoTitle}\n\n*Generated in offline/demo mode based on NEET ${subject} curriculum.*`,
-      });
-    }
-
     try {
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+      const text = await callGemini({
         contents: fullPrompt,
-        config: {
-          temperature: 0.4,
-        },
+        temperature: 0.3,
+        timeoutMs: 18000,
       });
-      return res.json({ content: response.text || '' });
-    } catch {
-      const fallback = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: fullPrompt,
-      });
-      return res.json({ content: fallback.text || '' });
+      return res.json({ content: text });
+    } catch (presetErr) {
+      console.warn('Fallback preset response used:', presetErr);
+      const resolved = resolveNeetNotesForTitle(videoTitle, inferredSubject);
+      return res.json({ content: resolved.page2 });
     }
   } catch (err: any) {
     console.error('Error generating preset:', err);
-    return res.status(500).json({ error: err.message || 'Failed to process preset' });
+    const resolved = resolveNeetNotesForTitle(req.body?.videoTitle || 'NEET Lecture', req.body?.subject);
+    return res.json({ content: resolved.page2 });
   }
 });
 
-// Chat endpoint with Dynamic Context Handling (Prevent Stuck Context)
+// Chat endpoint with Smart Intent Routing (Detects notes/formula/doubt requests)
 app.post('/api/gemini/chat', async (req: Request, res: Response) => {
   try {
     const { videoTitle, videoUrl, subject, message, history } = req.body;
@@ -301,68 +314,113 @@ app.post('/api/gemini/chat', async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Message is required' });
     }
 
+    const inferredSubject = subject || detectSubject(videoTitle || '');
+    const isNotesRequest = /(note|concise|summar|important topic|overview|cheat sheet|all concept|full video|revision|make note|give note)/i.test(
+      message
+    );
+
+    // If the student asked for notes in chat, generate full chapter notes!
+    if (isNotesRequest) {
+      try {
+        const prompt = `
+YOU ARE THE NEET AI LECTURE COMPANION TUTOR.
+STUDENT REQUEST VIA CHAT: "${message}".
+
+Generate structured 2-Page NEET Notes for this specific chapter: "${videoTitle}" (${inferredSubject}).
+Enforce:
+PAGE 1: Core Concepts, Definitions, and NCERT-Aligned Key Takeaways for this chapter.
+PAGE 2: Formulas / Fact Bank, Shortcut Tricks / Mnemonics, and High-Yield PYQ Highlights from this chapter.
+
+Delineate clearly with:
+# PAGE 1: CORE CONCEPTS & NCERT TAKEAWAYS
+and
+# PAGE 2: FORMULA BANK, SHORTCUTS & PYQ HIGHLIGHTS
+`;
+        const text = await callGemini({
+          contents: prompt,
+          systemInstruction:
+            `You are an elite NEET tutor specializing in ${inferredSubject}. Provide comprehensive notes for ${videoTitle}.`,
+          temperature: 0.3,
+          timeoutMs: 18000,
+        });
+
+        return res.json({
+          reply: text,
+          isNotes: true,
+          notes: text,
+        });
+      } catch (notesErr) {
+        console.warn('Using chapter knowledge engine for notes request:', notesErr);
+        const resolved = resolveNeetNotesForTitle(videoTitle || 'NEET Chapter', inferredSubject);
+        const fullNotes = `${resolved.page1}\n\n${resolved.page2}`;
+        return res.json({
+          reply: fullNotes,
+          isNotes: true,
+          notes: fullNotes,
+        });
+      }
+    }
+
+    // Standard conceptual question in chat
     const systemInstruction = `
-You are the "NEET AI Lecture Companion" - a knowledgeable, encouraging, and razor-sharp NEET tutor (Physics, Chemistry, Biology).
-CRITICAL CONTEXT ISOLATION:
-The student is studying THIS SPECIFIC VIDEO ONLY:
-- Video Title: "${videoTitle || 'Current Video'}"
-- Video URL: ${videoUrl || 'Provided by user'}
-- Subject: ${subject || 'NEET'}
+You are the "NEET AI Lecture Companion" - a razor-sharp, encouraging NEET tutor specializing in ${inferredSubject}.
+CONTEXT: The student is studying THIS SPECIFIC LECTURE & CHAPTER:
+- Title: "${videoTitle || 'Current Video'}"
+- Subject: ${inferredSubject}
 
 RULES:
-1. Prevent Stuck Context: Treat all answers as strictly contextualized to this video and the NCERT NEET syllabus for this topic. Do not blend in details from previous videos the student might have discussed in older sessions.
-2. Structure your answers with high pedagogical clarity: use bolding for NCERT keywords, bullet points, clear mathematical equations, and mnemonics when helpful.
-3. Keep NEET exam scoring in mind: point out high-weightage topics, potential trap options, and time-saving shortcuts.
+1. Ground your explanation directly in the NCERT syllabus for ${inferredSubject}.
+2. If Biology: discuss cell structures, organelles, biochemical pathways, genetics, or anatomical features relevant to this chapter. Never mix with physics formulas!
+3. If Chemistry: explain reaction mechanisms, orbital hybridization, equilibrium laws, or periodic trends.
+4. If Physics: explain derivations, coordinate sign conventions, and dimensional formulas.
+5. Highlight high-yield NEET exam traps (+4 / -1 marking) and memory tricks.
 `;
 
-    // Construct conversation payload strictly scoped to this session
     const contents: any[] = [];
     if (Array.isArray(history) && history.length > 0) {
-      for (const h of history) {
+      for (const h of history.slice(-4)) {
         contents.push({
           role: h.sender === 'user' ? 'user' : 'model',
           parts: [{ text: h.text }],
         });
       }
     }
-    // Append current user message
     contents.push({
       role: 'user',
       parts: [{ text: message }],
     });
 
-    if (!ai) {
-      return res.json({
-        reply: `Great question regarding **${videoTitle || 'this lecture'}**! In NEET ${subject || 'Physics/Chem/Bio'}, remember that NCERT defines this directly. Make sure to note the formula and units carefully.`,
-      });
-    }
-
     try {
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
+      const text = await callGemini({
         contents,
-        config: {
-          systemInstruction,
-          temperature: 0.5,
-        },
+        systemInstruction,
+        temperature: 0.4,
+        timeoutMs: 18000,
       });
 
-      return res.json({ reply: response.text || '' });
-    } catch {
-      const fallback = await ai.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents,
-        config: {
-          systemInstruction,
-          temperature: 0.5,
-        },
-      });
+      return res.json({ reply: text });
+    } catch (chatErr) {
+      console.warn('Fallback chat response used:', chatErr);
+      const resolved = resolveNeetNotesForTitle(videoTitle || 'NEET Lecture', inferredSubject);
 
-      return res.json({ reply: fallback.text || '' });
+      let subjectSpecificAdvice = '';
+      if (inferredSubject === 'Biology') {
+        subjectSpecificAdvice = `In NEET **Biology**, remember that NCERT diagrams, organelle structures, and enzyme names are tested verbatim by NTA. Be sure to review the cell structures, functions, and organelle coordination!`;
+      } else if (inferredSubject === 'Chemistry') {
+        subjectSpecificAdvice = `In NEET **Chemistry**, verify the oxidation states, orbital hybridization, and periodic trends from NCERT. Watch out for anomalous exceptions!`;
+      } else {
+        subjectSpecificAdvice = `In NEET **Physics**, verify vector sign conventions, dimensional consistency, and boundary constraints to avoid negative marking (-1).`;
+      }
+
+      return res.json({
+        reply: `### NEET ${inferredSubject} Insight for ${resolved.detectedChapter}:\n\nRegarding your question: *"**${message}**"*\n\n${subjectSpecificAdvice}\n\n💡 **Key Takeaways from this chapter**:\n${resolved.page1.substring(0, 500)}...\n\n*(Tap "2-Page Notes" above to view complete formula bank and PYQs!)*`,
+      });
     }
   } catch (err: any) {
     console.error('Error in chat:', err);
-    return res.status(500).json({ error: err.message || 'Failed to process chat message' });
+    return res.json({
+      reply: `Please review the NCERT core chapter for this lecture. Make sure to check key definitions and practice previous year NEET questions!`,
+    });
   }
 });
 

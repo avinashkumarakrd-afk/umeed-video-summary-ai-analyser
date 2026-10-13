@@ -128,7 +128,7 @@ class NeetCompanionViewModel : ViewModel() {
      * When a user inputs a NEW YouTube URL:
      * 1. Clear/reset previous chat session state in the app.
      * 2. Clear previous active notes.
-     * 3. Force Gemini API (gemini-2.5-flash) to load ONLY the newly provided video as fresh context.
+     * 3. Force Gemini API (gemini-3.8-flash) to load ONLY the newly provided video as fresh context.
      */
     fun loadNewVideo(rawUrl: String) {
         val trimmed = rawUrl.trim()
@@ -398,7 +398,7 @@ fun NeetCompanionScreen(viewModel: NeetCompanionViewModel) {
                                 color = TextPrimary
                             )
                             Text(
-                                text = "Powered by gemini-2.5-flash • Dynamic Context",
+                                text = "Powered by gemini-3.8-flash • Dynamic Context",
                                 fontSize = 11.sp,
                                 color = TextSecondary
                             )

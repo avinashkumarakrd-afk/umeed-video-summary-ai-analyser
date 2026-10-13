@@ -9,6 +9,7 @@ interface ChatFeedProps {
   isLoading: boolean;
   videoTitle?: string;
   subject?: string;
+  onInstantNotes?: () => void;
 }
 
 export const ChatFeed: React.FC<ChatFeedProps> = ({
@@ -17,6 +18,7 @@ export const ChatFeed: React.FC<ChatFeedProps> = ({
   isLoading,
   videoTitle,
   subject,
+  onInstantNotes,
 }) => {
   const [inputText, setInputText] = useState('');
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -187,11 +189,21 @@ export const ChatFeed: React.FC<ChatFeedProps> = ({
             <div className="w-8 h-8 rounded-xl bg-[#1E293B] border border-[#38BDF8]/40 flex items-center justify-center text-[#38BDF8] shrink-0 shadow-md">
               <Bot className="w-4 h-4 animate-pulse" />
             </div>
-            <div className="bg-[#1E293B] border border-[#334155] rounded-2xl rounded-tl-none p-3.5 shadow-md flex items-center gap-2">
-              <div className="w-3.5 h-3.5 border-2 border-[#38BDF8] border-t-transparent rounded-full animate-spin" />
-              <span className="text-xs text-slate-300 font-medium">
-                Gemini is processing video context...
-              </span>
+            <div className="bg-[#1E293B] border border-[#334155] rounded-2xl rounded-tl-none p-3.5 shadow-md flex flex-col sm:flex-row items-start sm:items-center gap-2">
+              <div className="flex items-center gap-2">
+                <div className="w-3.5 h-3.5 border-2 border-[#38BDF8] border-t-transparent rounded-full animate-spin shrink-0" />
+                <span className="text-xs text-slate-300 font-medium">
+                  Gemini is processing video context...
+                </span>
+              </div>
+              {onInstantNotes && (
+                <button
+                  onClick={onInstantNotes}
+                  className="text-[11px] font-bold text-[#38BDF8] hover:text-[#7dd3fc] bg-[#0F172A] hover:bg-[#334155] px-2.5 py-1 rounded-lg border border-[#38BDF8]/40 transition-colors"
+                >
+                  Skip wait & view notes now →
+                </button>
+              )}
             </div>
           </div>
         )}

@@ -129,7 +129,7 @@ class NeetCompanionViewModel : ViewModel() {
      * DYNAMIC CONTEXT RESET:
      * 1. Clears previous chat messages.
      * 2. Clears previous active notes.
-     * 3. Sets fresh activeVideo context for gemini-2.5-flash.
+     * 3. Sets fresh activeVideo context for gemini-3.8-flash.
      */
     fun loadNewVideo(rawUrl: String) {
         val trimmed = rawUrl.trim()
