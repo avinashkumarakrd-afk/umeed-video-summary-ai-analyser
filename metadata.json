@@ -1,0 +1,6 @@
+{
+  "name": "NEET AI Lecture Companion",
+  "description": "Interactive AI study companion for NEET YouTube lectures with dynamic session reset, structured 2-page NCERT notes, formula sheets, PYQs, and native Android Jetpack Compose code.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
